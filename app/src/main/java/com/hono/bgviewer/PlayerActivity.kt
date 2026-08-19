@@ -14,6 +14,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -53,6 +54,8 @@ class PlayerActivity : AppCompatActivity() {
         private const val SEEK_STEP_MS = 10_000
         private const val AUTO_HIDE_DELAY_MS = 3_000L
         private const val INDICATOR_HIDE_DELAY_MS = 700L
+        private const val MIN_ZOOM_SCALE = 1f
+        private const val MAX_ZOOM_SCALE = 4f
     }
 
     private lateinit var videoView: VideoView
@@ -71,6 +74,12 @@ class PlayerActivity : AppCompatActivity() {
     private var isPrepared = false
     private var isUserSeeking = false
     private var isExporting = false
+
+    // ピンチ操作による拡大・縮小（動画は元のサイズ・向きのまま表示され、これで自由に拡大縮小できる）
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
+    private var zoomScale = 1f
+    private var zoomTranslationX = 0f
+    private var zoomTranslationY = 0f
 
     private lateinit var currentUri: Uri
     private var currentTitle: String = ""
@@ -303,18 +312,51 @@ class PlayerActivity : AppCompatActivity() {
         var isDragging = false
         var gestureIsVolume = false
         var startFraction = 0f
+        var multiTouchOccurred = false
+
+        var lastFocusX = 0f
+        var lastFocusY = 0f
+        scaleGestureDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                lastFocusX = detector.focusX
+                lastFocusY = detector.focusY
+                return true
+            }
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                zoomScale = (zoomScale * detector.scaleFactor).coerceIn(MIN_ZOOM_SCALE, MAX_ZOOM_SCALE)
+                // 2本指の動きに合わせて表示位置も動かす（拡大した状態で見たい場所を動かせるように）
+                zoomTranslationX += detector.focusX - lastFocusX
+                zoomTranslationY += detector.focusY - lastFocusY
+                lastFocusX = detector.focusX
+                lastFocusY = detector.focusY
+                applyZoomTransform()
+                return true
+            }
+        })
 
         view.setOnTouchListener { v, event ->
+            scaleGestureDetector.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
                     downY = event.y
                     isDragging = false
+                    multiTouchOccurred = false
                     gestureIsVolume = downX > v.width / 2f
                     startFraction = if (gestureIsVolume) volumeFraction else brightnessFraction
                     true
                 }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    // 2本目の指が触れたらピンチ操作とみなし、音量/明るさのドラッグ判定は行わない
+                    multiTouchOccurred = true
+                    isDragging = false
+                    true
+                }
                 MotionEvent.ACTION_MOVE -> {
+                    if (event.pointerCount > 1 || multiTouchOccurred) {
+                        // ピンチ中は拡大縮小のみ（ScaleGestureDetectorが処理済み）
+                        return@setOnTouchListener true
+                    }
                     val dy = downY - event.y
                     if (!isDragging && abs(dy) > touchSlop) {
                         isDragging = true
@@ -336,7 +378,7 @@ class PlayerActivity : AppCompatActivity() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (!isDragging) {
+                    if (!isDragging && !multiTouchOccurred) {
                         toggleControls()
                     } else {
                         hideIndicatorDelayed()
@@ -347,6 +389,18 @@ class PlayerActivity : AppCompatActivity() {
                 else -> false
             }
         }
+    }
+
+    /** ピンチによる拡大率・移動量を動画表示（VideoView）へ反映する */
+    private fun applyZoomTransform() {
+        videoView.scaleX = zoomScale
+        videoView.scaleY = zoomScale
+        val maxTransX = (videoView.width * (zoomScale - 1f)) / 2f
+        val maxTransY = (videoView.height * (zoomScale - 1f)) / 2f
+        zoomTranslationX = zoomTranslationX.coerceIn(-maxTransX, maxTransX)
+        zoomTranslationY = zoomTranslationY.coerceIn(-maxTransY, maxTransY)
+        videoView.translationX = zoomTranslationX
+        videoView.translationY = zoomTranslationY
     }
 
     private fun applyVolume(fraction: Float) {
