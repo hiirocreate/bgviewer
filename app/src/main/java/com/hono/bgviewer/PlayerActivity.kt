@@ -429,7 +429,10 @@ class PlayerActivity : AppCompatActivity() {
             centerX,
             centerY
         )
-        matrix.postRotate(videoRotationDegrees.toFloat(), centerX, centerY)
+        // 実機で確認したところ、動画に埋め込まれた回転角どおりに回転させると上下が逆になったため、
+        // 180度分を補正して回転させている（90度／270度が入れ替わり、270度／90度になる）。
+        val correctedRotation = ((videoRotationDegrees + 180) % 360 + 360) % 360
+        matrix.postRotate(correctedRotation.toFloat(), centerX, centerY)
         matrix.postScale(fitScale, fitScale, centerX, centerY)
 
         baseTransform = matrix
@@ -496,6 +499,10 @@ class PlayerActivity : AppCompatActivity() {
                     // 2本目の指が触れたらピンチ操作とみなし、音量/明るさのドラッグ判定は行わない
                     multiTouchOccurred = true
                     isDragging = false
+                    true
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    // 指を1本離してもまだピンチ操作中とみなす（最後の1本が離れるまでタップ扱いにしない）
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
