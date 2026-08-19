@@ -3,9 +3,12 @@ package com.hono.bgviewer
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.media.AudioManager
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -15,6 +18,8 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -25,7 +30,6 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.VideoView
 import androidx.appcompat.app.AppCompatActivity
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -41,10 +45,18 @@ import kotlin.math.roundToInt
  * 「Z以外のアプリからは閲覧できない」という設計（署名レベル権限＋非公開ストレージ）を破るものではない。
  * ボタンを押さない限り、録画データはこれまで通りZ以外の誰からも見えない。
  *
+ * 再生には標準のVideoView（内部はSurfaceView）ではなく、TextureViewを使っている。
+ * SurfaceViewは表示内容が別レイヤーで合成されるため、拡大縮小（ピンチズーム）などの
+ * View変形が効かない・当たり判定と見た目がズレるといった問題があり、ピンチ操作に対応できない。
+ * TextureViewは通常のViewとして描画されるため、変形（回転・拡大縮小・平行移動）を自前で
+ * 完全にコントロールできる。そのため、動画の向き（縦動画かどうか）・アスペクト比の補正・
+ * ピンチズームのいずれも、このActivityがMatrixを使って自分で計算して適用している。
+ *
  * 操作方法：
  * - 画面を軽くタップ：再生バー（シークバー・早送り/早戻し・再生停止）の表示/非表示を切り替え
  * - 画面右側を上下にスワイプ：音量調整
  * - 画面左側を上下にスワイプ：画面の明るさ調整
+ * - ピンチ（2本指）：拡大・縮小、拡大中は2本指のまま動かすと表示位置を移動
  */
 class PlayerActivity : AppCompatActivity() {
 
@@ -58,7 +70,7 @@ class PlayerActivity : AppCompatActivity() {
         private const val MAX_ZOOM_SCALE = 4f
     }
 
-    private lateinit var videoView: VideoView
+    private lateinit var textureView: TextureView
     private lateinit var controlBar: LinearLayout
     private lateinit var seekBar: SeekBar
     private lateinit var playPauseBtn: Button
@@ -71,9 +83,19 @@ class PlayerActivity : AppCompatActivity() {
     private var volumeFraction = 0f
     private var brightnessFraction = 0.5f
 
+    private var mediaPlayer: MediaPlayer? = null
     private var isPrepared = false
     private var isUserSeeking = false
     private var isExporting = false
+
+    // 動画ファイル自体が持つ「回転して表示すべき角度」と、回転前の実サイズ。
+    // MediaPlayer/TextureViewはこの回転を自動では適用してくれないため、自分でMatrixを組んで反映する。
+    private var videoRotationDegrees = 0
+    private var videoNaturalWidth = 0
+    private var videoNaturalHeight = 0
+
+    // TextureViewの回転・アスペクト比補正だけを反映した基準となる変形（ピンチズームは含まない）
+    private var baseTransform = Matrix()
 
     // ピンチ操作による拡大・縮小（動画は元のサイズ・向きのまま表示され、これで自由に拡大縮小できる）
     private lateinit var scaleGestureDetector: ScaleGestureDetector
@@ -89,7 +111,7 @@ class PlayerActivity : AppCompatActivity() {
     private val positionUpdater = object : Runnable {
         override fun run() {
             if (isPrepared && !isUserSeeking) {
-                val pos = videoView.currentPosition
+                val pos = mediaPlayer?.currentPosition ?: 0
                 seekBar.progress = pos
                 currentTimeText.text = formatTime(pos)
             }
@@ -118,8 +140,35 @@ class PlayerActivity : AppCompatActivity() {
 
         currentUri = Uri.parse(uriString)
         currentTitle = title
+        readVideoOrientation(currentUri)
         setContentView(buildUi(currentUri, title))
         mainHandler.post(positionUpdater)
+    }
+
+    /**
+     * 動画ファイル自体に埋め込まれている「回転して表示すべき角度」と、回転前の実サイズを読み取る。
+     * MediaPlayer/TextureViewでの再生時にはこの情報が自動で使われないため、ここで先に読んでおき、
+     * 自分でTextureViewへの変形（Matrix）として反映する。
+     */
+    private fun readVideoOrientation(uri: Uri) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(this, uri)
+            videoRotationDegrees = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+            videoNaturalWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull() ?: 0
+            videoNaturalHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull() ?: 0
+        } catch (e: Exception) {
+            // 読み取れなくても回転なし・サイズ不明のまま再生自体は続行できるようにする
+        } finally {
+            try {
+                retriever.release()
+            } catch (e: Exception) {
+                // 無視
+            }
+        }
     }
 
     private fun readSystemBrightnessFraction(): Float {
@@ -136,10 +185,10 @@ class PlayerActivity : AppCompatActivity() {
     private fun buildUi(uri: Uri, title: String): View {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-        videoView = VideoView(this)
-        root.addView(videoView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+        textureView = TextureView(this)
+        root.addView(textureView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
 
-        // タップでコントロール表示切替、左右スワイプで明るさ・音量を調整する透明レイヤー
+        // タップでコントロール表示切替、上下スワイプで明るさ・音量、ピンチで拡大縮小する透明レイヤー
         val gestureLayer = View(this)
         root.addView(gestureLayer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setupGestureLayer(gestureLayer)
@@ -176,32 +225,71 @@ class PlayerActivity : AppCompatActivity() {
         root.addView(controlBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         setControlsEnabled(false)
 
-        videoView.setOnErrorListener { _, _, _ ->
-            Toast.makeText(this, "再生に失敗しました", Toast.LENGTH_SHORT).show()
-            true
-        }
+        textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                startPlayback(uri, Surface(surface))
+                configureBaseTransform()
+            }
 
-        try {
-            videoView.setVideoURI(uri)
-            videoView.setOnPreparedListener { mp ->
-                mp.isLooping = false
-                isPrepared = true
-                seekBar.max = videoView.duration.coerceAtLeast(0)
-                durationText.text = formatTime(videoView.duration)
-                setControlsEnabled(true)
-                videoView.start()
-                playPauseBtn.text = "❚❚"
-                scheduleAutoHide()
+            override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                configureBaseTransform()
             }
-            videoView.setOnCompletionListener {
-                playPauseBtn.text = "▶"
-                showControls(autoHide = false)
+
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                releasePlayer()
+                return true
             }
-        } catch (e: Exception) {
-            Toast.makeText(this, "再生に失敗しました", Toast.LENGTH_SHORT).show()
+
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
         }
 
         return root
+    }
+
+    private fun startPlayback(uri: Uri, surface: Surface) {
+        try {
+            val mp = MediaPlayer()
+            mediaPlayer = mp
+            mp.setSurface(surface)
+            mp.setDataSource(this, uri)
+            mp.isLooping = false
+            mp.setOnPreparedListener { player ->
+                isPrepared = true
+                if (videoNaturalWidth == 0 || videoNaturalHeight == 0) {
+                    // メタデータから読めなかった場合の保険（回転は無しとして扱う）
+                    videoNaturalWidth = player.videoWidth
+                    videoNaturalHeight = player.videoHeight
+                }
+                configureBaseTransform()
+                seekBar.max = player.duration.coerceAtLeast(0)
+                durationText.text = formatTime(player.duration)
+                setControlsEnabled(true)
+                player.start()
+                playPauseBtn.text = "❚❚"
+                scheduleAutoHide()
+            }
+            mp.setOnCompletionListener {
+                playPauseBtn.text = "▶"
+                showControls(autoHide = false)
+            }
+            mp.setOnErrorListener { _, _, _ ->
+                Toast.makeText(this, "再生に失敗しました", Toast.LENGTH_SHORT).show()
+                true
+            }
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            Toast.makeText(this, "再生に失敗しました", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun releasePlayer() {
+        try {
+            mediaPlayer?.release()
+        } catch (e: Exception) {
+            // 無視
+        }
+        mediaPlayer = null
+        isPrepared = false
     }
 
     private fun buildControlBar(): LinearLayout {
@@ -235,7 +323,7 @@ class PlayerActivity : AppCompatActivity() {
                 cancelAutoHide()
             }
             override fun onStopTrackingTouch(sb: SeekBar?) {
-                videoView.seekTo(sb?.progress ?: 0)
+                mediaPlayer?.seekTo(sb?.progress ?: 0)
                 isUserSeeking = false
                 scheduleAutoHide()
             }
@@ -252,18 +340,20 @@ class PlayerActivity : AppCompatActivity() {
         val rewindBtn = Button(this).apply {
             text = "⏪ 10秒"
             setOnClickListener {
-                videoView.seekTo((videoView.currentPosition - SEEK_STEP_MS).coerceAtLeast(0))
+                val player = mediaPlayer ?: return@setOnClickListener
+                player.seekTo((player.currentPosition - SEEK_STEP_MS).coerceAtLeast(0))
                 scheduleAutoHide()
             }
         }
         playPauseBtn = Button(this).apply {
             text = "▶"
             setOnClickListener {
-                if (videoView.isPlaying) {
-                    videoView.pause()
+                val player = mediaPlayer ?: return@setOnClickListener
+                if (player.isPlaying) {
+                    player.pause()
                     text = "▶"
                 } else {
-                    videoView.start()
+                    player.start()
                     text = "❚❚"
                 }
                 scheduleAutoHide()
@@ -272,8 +362,9 @@ class PlayerActivity : AppCompatActivity() {
         val forwardBtn = Button(this).apply {
             text = "10秒 ⏩"
             setOnClickListener {
-                val dur = videoView.duration.coerceAtLeast(0)
-                videoView.seekTo((videoView.currentPosition + SEEK_STEP_MS).coerceAtMost(dur))
+                val player = mediaPlayer ?: return@setOnClickListener
+                val dur = player.duration.coerceAtLeast(0)
+                player.seekTo((player.currentPosition + SEEK_STEP_MS).coerceAtMost(dur))
                 scheduleAutoHide()
             }
         }
@@ -303,7 +394,62 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    // ---- タップでコントロール表示切替 / 縦スワイプで明るさ・音量調整 ----
+    // ---- 動画の向き・アスペクト比の補正、ピンチズーム ----
+
+    /**
+     * 動画の回転メタデータとTextureViewの実サイズから、「回転を打ち消し、正しい向き・
+     * アスペクト比で、画面に収まるように」表示するための基準変形を計算する。
+     * TextureViewは何もしないと動画のバッファをView全体に引き伸ばして表示してしまうため、
+     * まずその引き伸ばしを打ち消して実際の縦横比に戻し、次に必要な角度だけ回転させ、
+     * 最後に画面（View）に収まるよう縮小・拡大する（切り取らず全体が見えるようにする）。
+     */
+    private fun configureBaseTransform() {
+        if (!::textureView.isInitialized) return
+        val viewWidth = textureView.width
+        val viewHeight = textureView.height
+        if (viewWidth <= 0 || viewHeight <= 0 || videoNaturalWidth <= 0 || videoNaturalHeight <= 0) return
+
+        val rotated = videoRotationDegrees == 90 || videoRotationDegrees == 270
+        val displayWidth = if (rotated) videoNaturalHeight else videoNaturalWidth
+        val displayHeight = if (rotated) videoNaturalWidth else videoNaturalHeight
+
+        val fitScale = minOf(
+            viewWidth.toFloat() / displayWidth.toFloat(),
+            viewHeight.toFloat() / displayHeight.toFloat()
+        )
+
+        val centerX = viewWidth / 2f
+        val centerY = viewHeight / 2f
+
+        val matrix = Matrix()
+        // TextureViewのデフォルトの引き伸ばし（バッファを常にView全体に合わせて伸縮させる挙動）を打ち消す
+        matrix.setScale(
+            videoNaturalWidth.toFloat() / viewWidth.toFloat(),
+            videoNaturalHeight.toFloat() / viewHeight.toFloat(),
+            centerX,
+            centerY
+        )
+        matrix.postRotate(videoRotationDegrees.toFloat(), centerX, centerY)
+        matrix.postScale(fitScale, fitScale, centerX, centerY)
+
+        baseTransform = matrix
+        applyCombinedTransform()
+    }
+
+    /** 基準変形（回転・アスペクト比補正）にピンチズームの拡大率・移動量を重ねてTextureViewへ反映する */
+    private fun applyCombinedTransform() {
+        if (!::textureView.isInitialized) return
+        val viewWidth = textureView.width
+        val viewHeight = textureView.height
+        if (viewWidth <= 0 || viewHeight <= 0) return
+
+        val combined = Matrix(baseTransform)
+        val centerX = viewWidth / 2f
+        val centerY = viewHeight / 2f
+        combined.postScale(zoomScale, zoomScale, centerX, centerY)
+        combined.postTranslate(zoomTranslationX, zoomTranslationY)
+        textureView.setTransform(combined)
+    }
 
     private fun setupGestureLayer(view: View) {
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
@@ -329,7 +475,7 @@ class PlayerActivity : AppCompatActivity() {
                 zoomTranslationY += detector.focusY - lastFocusY
                 lastFocusX = detector.focusX
                 lastFocusY = detector.focusY
-                applyZoomTransform()
+                applyCombinedTransform()
                 return true
             }
         })
@@ -389,18 +535,6 @@ class PlayerActivity : AppCompatActivity() {
                 else -> false
             }
         }
-    }
-
-    /** ピンチによる拡大率・移動量を動画表示（VideoView）へ反映する */
-    private fun applyZoomTransform() {
-        videoView.scaleX = zoomScale
-        videoView.scaleY = zoomScale
-        val maxTransX = (videoView.width * (zoomScale - 1f)) / 2f
-        val maxTransY = (videoView.height * (zoomScale - 1f)) / 2f
-        zoomTranslationX = zoomTranslationX.coerceIn(-maxTransX, maxTransX)
-        zoomTranslationY = zoomTranslationY.coerceIn(-maxTransY, maxTransY)
-        videoView.translationX = zoomTranslationX
-        videoView.translationY = zoomTranslationY
     }
 
     private fun applyVolume(fraction: Float) {
@@ -521,14 +655,22 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (::videoView.isInitialized && videoView.isPlaying) {
-            videoView.pause()
-            if (::playPauseBtn.isInitialized) playPauseBtn.text = "▶"
+        val player = mediaPlayer
+        if (player != null && isPrepared) {
+            try {
+                if (player.isPlaying) {
+                    player.pause()
+                    if (::playPauseBtn.isInitialized) playPauseBtn.text = "▶"
+                }
+            } catch (e: Exception) {
+                // 無視（すでに解放されている等）
+            }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         mainHandler.removeCallbacksAndMessages(null)
+        releasePlayer()
     }
 }
