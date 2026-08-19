@@ -1,12 +1,16 @@
 package com.hono.bgviewer
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Color
 import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -30,8 +34,11 @@ import kotlin.math.roundToInt
  *
  * FLAG_SECUREを付けているため、この画面はスクリーンショットにも他アプリの画面録画にも写らない
  * （Android自体の仕組みで、システムがこのウィンドウの内容をキャプチャさせない）。
- * また、共有・保存・エクスポートの導線を一切用意していない
- * （用意すると、そこから他アプリへ内容が渡ってしまい「このアプリからしか見られない」という前提が崩れるため）。
+ *
+ * 「アルバムに保存」ボタンのみ例外的に共有導線を用意している。これはユーザー本人が明示的に
+ * 選んだ動画1本だけを、ユーザー自身の操作で公開領域（MediaStore）へコピーする機能であり、
+ * 「Z以外のアプリからは閲覧できない」という設計（署名レベル権限＋非公開ストレージ）を破るものではない。
+ * ボタンを押さない限り、録画データはこれまで通りZ以外の誰からも見えない。
  *
  * 操作方法：
  * - 画面を軽くタップ：再生バー（シークバー・早送り/早戻し・再生停止）の表示/非表示を切り替え
@@ -63,6 +70,10 @@ class PlayerActivity : AppCompatActivity() {
 
     private var isPrepared = false
     private var isUserSeeking = false
+    private var isExporting = false
+
+    private lateinit var currentUri: Uri
+    private var currentTitle: String = ""
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -96,7 +107,9 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
-        setContentView(buildUi(Uri.parse(uriString), title))
+        currentUri = Uri.parse(uriString)
+        currentTitle = title
+        setContentView(buildUi(currentUri, title))
         mainHandler.post(positionUpdater)
     }
 
@@ -130,6 +143,16 @@ class PlayerActivity : AppCompatActivity() {
             setShadowLayer(4f, 0f, 0f, Color.BLACK)
         }
         root.addView(titleView, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
+
+        val exportBtn = Button(this).apply {
+            text = "⬇ アルバムに保存"
+            textSize = 11f
+            setOnClickListener { exportToGallery() }
+        }
+        root.addView(exportBtn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+            topMargin = 16
+            marginEnd = 16
+        })
 
         indicatorText = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -379,6 +402,60 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun cancelAutoHide() {
         mainHandler.removeCallbacks(autoHideRunnable)
+    }
+
+    // ---- アルバム（MediaStore）への書き出し ----
+    // ユーザーが明示的にボタンを押した動画1本だけを公開領域へコピーする。
+    // Zの非公開ストレージ自体からは何も消えず、Z以外から見えないという前提はそのまま。
+    private fun exportToGallery() {
+        if (isExporting) return
+        isExporting = true
+        Toast.makeText(this, "保存を開始しました…", Toast.LENGTH_SHORT).show()
+
+        val sourceUri = currentUri
+        val displayName = if (currentTitle.isNotBlank()) {
+            if (currentTitle.endsWith(".mp4", ignoreCase = true)) currentTitle else "$currentTitle.mp4"
+        } else {
+            "BGViewer_${System.currentTimeMillis()}.mp4"
+        }
+
+        Thread {
+            var success = false
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/BGViewer")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val destUri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                if (destUri != null) {
+                    contentResolver.openInputStream(sourceUri)?.use { input ->
+                        contentResolver.openOutputStream(destUri)?.use { output ->
+                            input.copyTo(output)
+                            success = true
+                        }
+                    }
+                    val doneValues = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
+                    contentResolver.update(destUri, doneValues, null, null)
+                    if (!success) {
+                        contentResolver.delete(destUri, null, null)
+                    }
+                }
+            } catch (e: Exception) {
+                success = false
+            }
+
+            val finalSuccess = success
+            mainHandler.post {
+                isExporting = false
+                Toast.makeText(
+                    this,
+                    if (finalSuccess) "アルバム（ムービー/BGViewer）に保存しました" else "保存に失敗しました",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }.start()
     }
 
     private fun formatTime(ms: Int): String {
