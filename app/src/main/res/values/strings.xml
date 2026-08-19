@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">BGViewer</string>
+    <string name="app_name">Z</string>
     <string name="empty_list_title">録画がありません</string>
     <string name="empty_list_hint">BGRecorderで録画すると、ここに一覧が表示されます。</string>
     <string name="not_installed_title">BGRecorderが見つかりません</string>
