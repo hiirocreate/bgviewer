@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var listView: ListView
     private lateinit var emptyView: View
     private lateinit var notInstalledView: View
-    private lateinit var adapter: RecordingsAdapter
+    private lateinit var recordingsAdapter: RecordingsAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,18 +47,18 @@ class MainActivity : AppCompatActivity() {
     private fun buildUi(): View {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-        adapter = RecordingsAdapter(this, mutableListOf())
+        recordingsAdapter = RecordingsAdapter(this, mutableListOf())
         listView = ListView(this).apply {
             setBackgroundColor(Color.BLACK)
             divider = null
             dividerHeight = 0
-            setAdapter(adapter)
+            setAdapter(recordingsAdapter)
             onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
-                val item = adapter.getItem(position) ?: return@OnItemClickListener
+                val item = recordingsAdapter.getItem(position) ?: return@OnItemClickListener
                 openPlayer(item)
             }
             setOnItemLongClickListener { _, _, position, _ ->
-                val item = adapter.getItem(position) ?: return@setOnItemLongClickListener true
+                val item = recordingsAdapter.getItem(position) ?: return@setOnItemLongClickListener true
                 confirmDelete(item)
                 true
             }
@@ -149,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             emptyView.visibility = View.GONE
             listView.visibility = View.VISIBLE
-            adapter.replaceAll(items)
+            recordingsAdapter.replaceAll(items)
         }
     }
 
