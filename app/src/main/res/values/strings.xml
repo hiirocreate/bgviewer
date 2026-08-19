@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">BGViewer</string>
+    <string name="empty_list_title">録画がありません</string>
+    <string name="empty_list_hint">BGRecorderで録画すると、ここに一覧が表示されます。</string>
+    <string name="not_installed_title">BGRecorderが見つかりません</string>
+    <string name="not_installed_hint">このアプリは録画データをBGRecorderからのみ読み込みます。BGRecorderをインストールしてください。</string>
+    <string name="delete_confirm_title">この録画を削除しますか？</string>
+    <string name="delete_confirm_message">元に戻せません。</string>
+    <string name="delete">削除</string>
+    <string name="cancel">キャンセル</string>
+    <string name="delete_hint">長押しで削除できます</string>
+</resources>

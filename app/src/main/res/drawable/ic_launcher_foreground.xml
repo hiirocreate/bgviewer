@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 画面枠（フィルムフレーム風の角丸長方形） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,32 L84,32 A6,6 0 0 1 90,38 L90,70 A6,6 0 0 1 84,76 L24,76 A6,6 0 0 1 18,70 L18,38 A6,6 0 0 1 24,32 Z" />
+    <!-- 内側の暗い画面 -->
+    <path
+        android:fillColor="#1C1C1C"
+        android:pathData="M27,39 L81,39 L81,69 L27,69 Z" />
+    <!-- 再生ボタン（三角形） -->
+    <path
+        android:fillColor="#0A84FF"
+        android:pathData="M48,47 L67,54 L48,61 Z" />
+</vector>
